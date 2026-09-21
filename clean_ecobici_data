@@ -1,0 +1,127 @@
+"""
+clean_ecobici_data.py
+
+Ecobici Bike Usage Analysis - Data Cleaning & Unification
+-----------------------------------------------------------
+Author: Felipe Otalvaro
+LinkedIn: https://www.linkedin.com/in/felipe-ot%C3%A1lvaro-agudelo/
+
+This script takes the raw monthly CSV files published by Ecobici's open
+data portal (2026-01.csv through 2026-08.csv), combines them into a
+single dataset, and applies a set of cleaning rules so the data is ready
+for analysis.
+
+Cleaning rules applied:
+
+1. Rows with a missing/null bike ID ("Bici") are dropped, since a ride
+   can't be attributed to a specific bike without one.
+
+2. The separate date and time columns for departure ("Retiro") and
+   arrival ("Arribo") are combined into full datetime values, and ride
+   duration is calculated in seconds.
+
+3. Rides shorter than 2 minutes are removed. A ride this short most
+   likely means the user picked up the bike, immediately noticed
+   something was wrong with it (flat tire, broken seat, stuck chain,
+   etc.), and returned it right away. It doesn't represent genuine
+   bike usage/stress, so keeping it would distort the analysis.
+
+4. Rides longer than 2 hours are removed. Ecobici's standard membership
+   only covers 45 minutes of continuous use per ride on weekdays (90
+   minutes on weekends) before extra charges apply, so legitimate rides
+   rarely run much longer than that. A ride lasting 2+ hours more likely
+   reflects a system issue (e.g., a bike that wasn't properly docked, or
+   a return that wasn't logged correctly) rather than actual continuous
+   riding, so it's treated as a data/system error rather than real usage.
+
+Output:
+A single cleaned CSV file ("ecobici_clean.csv") saved in the same folder
+as the raw files, ready to be used by analyze_ecobici_data.py.
+"""
+
+import pandas as pd
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# CONFIG - adjust this path if your files live somewhere else
+# ---------------------------------------------------------------------------
+DATA_FOLDER = Path(r"C:\Users\felip\Downloads\ecobici")
+OUTPUT_FILE = DATA_FOLDER / "ecobici_clean.csv"
+
+MIN_DURATION_SECONDS = 2 * 60          # 2 minutes
+MAX_DURATION_SECONDS = 2 * 60 * 60     # 2 hours
+
+
+def load_all_files(folder: Path) -> pd.DataFrame:
+    """Read every 2026-XX.csv file in the folder and concatenate them into one DataFrame."""
+    all_files = sorted(folder.glob("2026-*.csv"))
+
+    if not all_files:
+        raise FileNotFoundError(f"No files matching '2026-*.csv' found in {folder}")
+
+    print(f"Found {len(all_files)} files:")
+    for f in all_files:
+        print(f"  - {f.name}")
+
+    frames = [pd.read_csv(f) for f in all_files]
+    combined = pd.concat(frames, ignore_index=True)
+
+    print(f"\nTotal rows before cleaning: {len(combined):,}")
+    return combined
+
+
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply all cleaning rules described in the module docstring above."""
+
+    # Rule 1: drop rows with no bike ID
+    df = df.dropna(subset=["Bici"])
+
+    # Combine date + time columns into full datetime objects.
+    # dayfirst=True because the raw dates are in DD/MM/YYYY format.
+    df["Retiro_Datetime"] = pd.to_datetime(
+        df["Fecha_Retiro"].astype(str) + " " + df["Hora_Retiro"].astype(str),
+        dayfirst=True,
+        errors="coerce",
+    )
+    df["Arribo_Datetime"] = pd.to_datetime(
+        df["Fecha_Arribo"].astype(str) + " " + df["Hora_Arribo"].astype(str),
+        dayfirst=True,
+        errors="coerce",
+    )
+
+    # Drop rows where a date/time value couldn't be parsed at all
+    before_parse = len(df)
+    df = df.dropna(subset=["Retiro_Datetime", "Arribo_Datetime"])
+    print(f"Removed {before_parse - len(df):,} rows with unreadable dates/times")
+
+    # Ride duration in seconds
+    df["Duration_Seconds"] = (df["Arribo_Datetime"] - df["Retiro_Datetime"]).dt.total_seconds()
+
+    # Drop negative durations (data entry errors: arrival logged before departure)
+    before_negative = len(df)
+    df = df[df["Duration_Seconds"] > 0]
+    print(f"Removed {before_negative - len(df):,} rows with negative durations")
+
+    # Rules 3 & 4: remove outlier rides (too short or too long)
+    before_outliers = len(df)
+    df = df[
+        (df["Duration_Seconds"] >= MIN_DURATION_SECONDS)
+        & (df["Duration_Seconds"] <= MAX_DURATION_SECONDS)
+    ]
+    print(f"Removed {before_outliers - len(df):,} rides as outliers (<2 min or >2 hours)")
+
+    return df
+
+
+def main():
+    raw = load_all_files(DATA_FOLDER)
+    clean = clean_data(raw)
+
+    print(f"\nTotal rows after cleaning: {len(clean):,}")
+
+    clean.to_csv(OUTPUT_FILE, index=False)
+    print(f"\nClean dataset saved to: {OUTPUT_FILE}")
+
+
+if __name__ == "__main__":
+    main()
